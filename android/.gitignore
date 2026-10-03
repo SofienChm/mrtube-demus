@@ -1,0 +1,16 @@
+# The Gradle wrapper is committed deliberately: without gradlew and
+# gradle-wrapper.jar a fresh clone cannot build. Regenerating the wrapper is
+# possible but a needless step for anyone who just wants to run the app.
+# (Flutter's template ignores these; that default is wrong for a shared repo.)
+
+/.gradle
+/captures/
+/local.properties
+GeneratedPluginRegistrant.java
+.cxx/
+
+# Remember to never publicly share your keystore.
+# See https://flutter.dev/to/reference-keystore
+key.properties
+**/*.keystore
+**/*.jks

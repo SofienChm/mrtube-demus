@@ -1,0 +1,46 @@
+name: mrplay_new
+description: "MrPlay - music streaming and discovery."
+publish_to: 'none'
+
+version: 1.0.0+1
+
+environment:
+  sdk: ^3.13.5
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  cupertino_icons: ^1.0.8
+
+  # State management
+  flutter_bloc: ^9.1.1
+  equatable: ^3.0.0
+  rxdart: ^0.28.0
+
+  # Audio core + background service
+  just_audio: ^0.10.6
+  audio_service: ^0.18.19
+  audio_session: ^0.2.4
+
+  # Local persistence (no codegen, no native lib conflicts)
+  hive: ^2.2.3
+  hive_flutter: ^1.1.0
+
+  # Networking
+  dio: ^5.11.1
+
+  # UI
+  cached_network_image: ^4.0.4
+  shimmer: ^4.0.0
+
+  # Compliant YouTube playback (official IFrame Player API)
+  youtube_player_iframe: ^6.0.2
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true
