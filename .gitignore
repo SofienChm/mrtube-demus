@@ -30,7 +30,23 @@ migrate_working_dir/
 .flutter-plugins-dependencies
 .pub-cache/
 .pub/
-/build/
+/build/*
+# Sideloadable debug APKs are committed on purpose, so the app can be installed
+# on a phone without a local Flutter/Android toolchain. They are ~240 MB
+# combined, which is the accepted cost of that convenience.
+#
+# The fat multi-ABI `app-debug.apk` (161 MB) is deliberately NOT committed: it
+# exceeds GitHub's 100 MB per-file limit and the push would be rejected outright.
+# Anyone wanting the universal APK should build it, or download a per-ABI one.
+!/build/app/
+/build/app/*
+!/build/app/outputs/
+/build/app/outputs/*
+!/build/app/outputs/flutter-apk/
+/build/app/outputs/flutter-apk/*
+!/build/app/outputs/flutter-apk/app-arm64-v8a-debug.apk
+!/build/app/outputs/flutter-apk/app-armeabi-v7a-debug.apk
+!/build/app/outputs/flutter-apk/app-x86_64-debug.apk
 /coverage/
 
 # Symbolication related
