@@ -2,7 +2,9 @@ import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart' show visibleForTesting;
 
 import '../errors/exceptions.dart';
+import '../models/artist_summary.dart';
 import '../models/track.dart';
+import 'artist_source.dart';
 import 'music_source.dart';
 
 /// Audius: direct-audio playback with no daily quota cliff.
@@ -25,7 +27,7 @@ import 'music_source.dart';
 ///   `url` is already absolute.
 /// * Playability is per-track via `is_streamable` / `is_available` /
 ///   `is_stream_gated` / `is_delete`.
-final class AudiusMusicSource implements MusicSource {
+final class AudiusMusicSource implements MusicSource, ArtistSource {
   AudiusMusicSource({this.appName = 'mrplay', Dio? dio}) : _dio = dio ?? Dio() {
     _dio.options = _dio.options.copyWith(
       connectTimeout: const Duration(seconds: 10),
@@ -210,6 +212,10 @@ final class AudiusMusicSource implements MusicSource {
       playCount: _asInt(json['play_count']),
       favoriteCount: _asInt(json['favorite_count']),
       createdAt: DateTime.tryParse('${json['created_at'] ?? ''}'),
+      // `user.id` rather than the track's own `user_id`: inside a track payload
+      // that field holds the CID form, and the CID is what a user-search result
+      // can be joined against.
+      userId: _userIdOf(user),
     );
   }
 
@@ -246,6 +252,170 @@ final class AudiusMusicSource implements MusicSource {
     if (node is! num) return null;
     if (node <= 0) return null;
     return Duration(milliseconds: (node * 1000).round());
+  }
+
+  /// Searches artist/channel accounts.
+  ///
+  /// Endpoint behaviour verified against the live API:
+  ///
+  /// * `GET /v1/users/search` returns `{ "data": [...] }` with no pagination
+  ///   metadata, at most ~10 results, and ignores `cursor`.
+  /// * The follower field is `follower_count` (singular). The plural
+  ///   `followers_count` exists in the payload but is always `null`, so reading
+  ///   the plural silently reports every artist as having zero followers.
+  /// * Relevance is poor enough to require [ArtistUserRanker]: an exact name
+  ///   query returned an unrelated 87k-follower account as the top result.
+  ///
+  /// Not part of [MusicSource] because it is a catalogue-shaped lookup rather
+  /// than track playback, and only providers with real user accounts implement
+  /// it.
+  @override
+  Future<List<ArtistSummary>> searchUsers(String query) async {
+    final String trimmed = query.trim();
+    if (trimmed.isEmpty) return const <ArtistSummary>[];
+
+    try {
+      final Response<dynamic> response = await _dio.get<dynamic>(
+        '$_host/v1/users/search',
+        queryParameters: <String, dynamic>{
+          'query': trimmed,
+          'app_name': appName,
+        },
+      );
+
+      final Map<String, dynamic> body = Map<String, dynamic>.from(
+        response.data as Map<dynamic, dynamic>,
+      );
+      final Object? rawItems = body['data'];
+      if (rawItems is! List) return const <ArtistSummary>[];
+
+      final List<ArtistSummary> artists = <ArtistSummary>[];
+      for (final Object? item in rawItems) {
+        if (item is! Map) continue;
+        final ArtistSummary? artist = parseArtistPayload(
+          Map<String, dynamic>.from(item),
+        );
+        if (artist != null) artists.add(artist);
+      }
+      return artists;
+    } on DioException catch (error) {
+      throw classifyDioError(error);
+    }
+  }
+
+  /// Fetches one artist's tracks, newest first as the API orders them.
+  ///
+  /// `GET /v1/users/{id}/tracks` returns `{ "data": [...] }` with the same track
+  /// shape as search and no pagination metadata, so paging is offset-based and
+  /// the end is inferred from a short page.
+  ///
+  /// [artistId] accepts either the CID (`id`) or the numeric `user_id`; both
+  /// resolve to the same account.
+  @override
+  Future<TrackPage> fetchArtistTracks(
+    String artistId, {
+    String? pageToken,
+  }) async {
+    final int offset = int.tryParse(pageToken ?? '') ?? 0;
+
+    try {
+      final Response<dynamic> response = await _dio.get<dynamic>(
+        '$_host/v1/users/$artistId/tracks',
+        queryParameters: <String, dynamic>{
+          'app_name': appName,
+          'limit': pageSize,
+          'offset': offset,
+        },
+      );
+
+      final Map<String, dynamic> body = Map<String, dynamic>.from(
+        response.data as Map<dynamic, dynamic>,
+      );
+      final Object? rawItems = body['data'];
+      if (rawItems is! List) {
+        return const TrackPage(items: <Track>[], nextPageToken: null);
+      }
+
+      final List<Track> tracks = <Track>[];
+      for (final Object? item in rawItems) {
+        if (item is! Map) continue;
+        final Track? track = _parseTrack(Map<String, dynamic>.from(item));
+        if (track != null) tracks.add(track);
+      }
+
+      final String? next = tracks.length < pageSize
+          ? null
+          : (offset + pageSize).toString();
+
+      return TrackPage(items: tracks, nextPageToken: next);
+    } on DioException catch (error) {
+      throw classifyDioError(error);
+    }
+  }
+
+  @visibleForTesting
+  static ArtistSummary? parseArtistPayload(Map<String, dynamic> json) {
+    final Object? sourceId = json['id'];
+    if (sourceId is! String || sourceId.isEmpty) return null;
+
+    final Object? nameNode = json['name'];
+    final String name = nameNode is String && nameNode.trim().isNotEmpty
+        ? nameNode.trim()
+        : 'Unknown artist';
+
+    final Object? handleNode = json['handle'];
+    final Object? bioNode = json['bio'];
+    final Object? locationNode = json['location'];
+
+    return ArtistSummary(
+      id: 'audius:$sourceId',
+      sourceId: sourceId,
+      name: name,
+      handle: handleNode is String && handleNode.isNotEmpty ? handleNode : null,
+      avatarUrl: _artworkUrl(json['profile_picture']),
+      coverUrl: _coverUrl(json['cover_photo']),
+      followerCount: _asInt(json['follower_count']),
+      trackCount: _asInt(json['track_count']),
+      isVerified: json['is_verified'] == true,
+      bio:
+          bioNode is String &&
+              bioNode.trim().isNotEmpty &&
+              bioNode.trim() != '-'
+          ? bioNode.trim()
+          : null,
+      location: locationNode is String && locationNode.isNotEmpty
+          ? locationNode
+          : null,
+    );
+  }
+
+  /// Cover photos are keyed by width alone (`"2000x"`), unlike track artwork
+  /// which uses explicit dimensions.
+  static String? _coverUrl(Object? node) {
+    if (node is String) return node.isEmpty ? null : node;
+    if (node is! Map) return null;
+
+    final List<String> sizes = node.keys.map((dynamic k) => '$k').toList()
+      ..sort((String a, String b) => _sizeOf(b).compareTo(_sizeOf(a)));
+    for (final String size in sizes) {
+      final Object? url = node[size];
+      if (url is String && url.isNotEmpty) return url;
+    }
+    return null;
+  }
+
+  static int _sizeOf(String size) => int.tryParse(size.split('x').first) ?? 0;
+
+  /// Both `id` (CID) and `user_id` (numeric) identify the same account and both
+  /// are accepted by `/v1/users/{id}/tracks`, so prefer the CID for consistency
+  /// with the id carried inside track payloads.
+  static String? _userIdOf(Map<String, dynamic> user) {
+    for (final String key in const <String>['id', 'user_id']) {
+      final Object? value = user[key];
+      if (value is String && value.isNotEmpty) return value;
+      if (value is int) return value.toString();
+    }
+    return null;
   }
 
   @override

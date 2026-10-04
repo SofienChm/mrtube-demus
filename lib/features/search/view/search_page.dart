@@ -4,9 +4,12 @@ import 'package:flutter_bloc/flutter_bloc.dart';
 import '../../../core/constants/app_colors.dart';
 import '../../../core/constants/app_spacing.dart';
 import '../../../core/errors/failures.dart';
+import '../../../core/models/artist_summary.dart';
 import '../../../core/models/track.dart';
 import '../../../core/search/search_sections.dart';
 import '../../../core/widgets/artwork.dart';
+import '../../artist/view/artist_page.dart';
+import '../../artist/widgets/artist_channel_card.dart';
 import '../../player/bloc/player_bloc.dart';
 import '../bloc/search_bloc.dart';
 import '../widgets/track_tile.dart';
@@ -168,6 +171,14 @@ class _ResultsList extends StatelessWidget {
     return Column(
       children: <Widget>[
         if (showCacheNotice) const _CacheNotice(),
+        // The channel row sits above the tracks. When a query names an artist,
+        // "who is this" is the prior question, and answering it first makes the
+        // grouped tracks below legible as belonging to that channel.
+        for (final ArtistSummary artist in state.artists)
+          ArtistChannelCard(
+            artist: artist,
+            onTap: () => Navigator.of(context).push(ArtistPage.route(artist)),
+          ),
         Expanded(
           child: Builder(
             builder: (BuildContext context) {

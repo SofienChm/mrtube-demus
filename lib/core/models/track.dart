@@ -30,6 +30,7 @@ final class Track extends Equatable {
     this.playCount = 0,
     this.favoriteCount = 0,
     this.createdAt,
+    this.userId,
   });
 
   /// Stable composite key: `<source>:<sourceId>`. Prevents collisions between
@@ -62,6 +63,12 @@ final class Track extends Equatable {
   /// Publication date, used to surface an artist's newest release.
   final DateTime? createdAt;
 
+  /// Provider id of the uploading user. This is the only stable link from a
+  /// track back to its artist, because artist *names* are neither unique nor
+  /// stable: two different users can both be called "Samara", and one user can
+  /// change their display name. Null for providers with no user concept.
+  final String? userId;
+
   bool get isDirectAudio =>
       playbackCapability == PlaybackCapability.directAudio;
 
@@ -76,6 +83,7 @@ final class Track extends Equatable {
     int? playCount,
     int? favoriteCount,
     DateTime? createdAt,
+    String? userId,
   }) {
     return Track(
       id: id,
@@ -90,6 +98,7 @@ final class Track extends Equatable {
       playCount: playCount ?? this.playCount,
       favoriteCount: favoriteCount ?? this.favoriteCount,
       createdAt: createdAt ?? this.createdAt,
+      userId: userId ?? this.userId,
     );
   }
 
@@ -106,6 +115,7 @@ final class Track extends Equatable {
     'playCount': playCount,
     'favoriteCount': favoriteCount,
     'createdAt': createdAt?.toIso8601String(),
+    'userId': userId,
   };
 
   static Track fromJson(Map<String, dynamic> json) => Track(
@@ -130,6 +140,8 @@ final class Track extends Equatable {
     createdAt: json['createdAt'] == null
         ? null
         : DateTime.tryParse(json['createdAt'] as String),
+    // Rows cached before this field existed simply have no channel link.
+    userId: json['userId'] as String?,
   );
 
   @override
@@ -146,6 +158,7 @@ final class Track extends Equatable {
     playCount,
     favoriteCount,
     createdAt,
+    userId,
   ];
 }
 

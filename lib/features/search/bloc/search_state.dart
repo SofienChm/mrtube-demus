@@ -58,6 +58,7 @@ final class SearchState extends Equatable {
     this.query = '',
     this.results = const <Track>[],
     this.suggestions = const <Track>[],
+    this.artists = const <ArtistSummary>[],
     this.nextPageToken,
     this.totalEstimate,
     this.usedCache = false,
@@ -73,6 +74,14 @@ final class SearchState extends Equatable {
   /// Autocomplete suggestions for the in-progress query. Kept separate from
   /// [results] so typing does not thrash the main list.
   final List<Track> suggestions;
+
+  /// Artist/channel accounts matching [query], ranked by name match rather than
+  /// by the provider's own ordering.
+  ///
+  /// Separate from [results] because they come from a different endpoint with
+  /// different failure modes: a channel lookup that fails must not empty the
+  /// track list.
+  final List<ArtistSummary> artists;
 
   final String? nextPageToken;
   final int? totalEstimate;
@@ -93,6 +102,7 @@ final class SearchState extends Equatable {
     String? query,
     List<Track>? results,
     List<Track>? suggestions,
+    List<ArtistSummary>? artists,
     String? nextPageToken,
     int? totalEstimate,
     bool? usedCache,
@@ -103,6 +113,7 @@ final class SearchState extends Equatable {
       query: query ?? this.query,
       results: results ?? this.results,
       suggestions: suggestions ?? this.suggestions,
+      artists: artists ?? this.artists,
       nextPageToken: clearPageToken
           ? null
           : (nextPageToken ?? this.nextPageToken),
@@ -117,6 +128,7 @@ final class SearchState extends Equatable {
     query,
     results,
     suggestions,
+    artists,
     nextPageToken,
     totalEstimate,
     usedCache,

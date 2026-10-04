@@ -5,6 +5,7 @@ import 'package:flutter_bloc/flutter_bloc.dart';
 
 import '../../../core/errors/exceptions.dart';
 import '../../../core/errors/failures.dart';
+import '../../../core/models/artist_summary.dart';
 import '../../../core/models/track.dart';
 import '../../../core/services/track_repository.dart';
 import '../../../core/utils/debouncer.dart';
@@ -53,6 +54,7 @@ final class SearchBloc extends Bloc<SearchEvent, SearchState> {
           query: '',
           suggestions: const <Track>[],
           results: const <Track>[],
+          artists: const <ArtistSummary>[],
           clearPageToken: true,
         ),
       );
@@ -105,6 +107,18 @@ final class SearchBloc extends Bloc<SearchEvent, SearchState> {
     }
 
     // 2. Reconcile with the network.
+    //
+    // Artist lookup starts now and in parallel but is awaited last, so the
+    // track list is never delayed by it. Its failure is folded into an empty
+    // list rather than propagated: a channel row is an enhancement, and letting
+    // it fail the whole search would be a worse outcome than omitting it.
+    final Future<List<ArtistSummary>> artistsPending = repository
+        .searchArtists(query)
+        .then<List<ArtistSummary>>(
+          (List<ArtistSummary> found) => found,
+          onError: (Object _) => const <ArtistSummary>[],
+        );
+
     try {
       final TrackPage page = await repository.search(query);
       if (generation != _queryGeneration || isClosed) return;
@@ -127,6 +141,11 @@ final class SearchBloc extends Bloc<SearchEvent, SearchState> {
           usedCache: false,
         ),
       );
+
+      final List<ArtistSummary> artists = await artistsPending;
+      if (generation != _queryGeneration || isClosed) return;
+      if (artists.isEmpty) return;
+      emit(state.copyWith(artists: artists));
     } on AppException catch (error) {
       if (generation != _queryGeneration || isClosed) return;
 

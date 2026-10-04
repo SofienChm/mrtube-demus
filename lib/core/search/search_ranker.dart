@@ -1,4 +1,5 @@
 import '../models/track.dart';
+import 'text_normalizer.dart';
 
 /// A track paired with the relevance score that decided its position.
 final class _Scored {
@@ -60,11 +61,11 @@ abstract final class SearchRanker {
 
   /// Relevance of [track] for [query]. Higher is better.
   static int score(String query, Track track) {
-    final String q = _normalize(query);
+    final String q = TextNormalizer.normalize(query);
     if (q.isEmpty) return 0;
 
-    final String artist = _normalize(track.artist);
-    final String title = _normalize(track.title);
+    final String artist = TextNormalizer.normalize(track.artist);
+    final String title = TextNormalizer.normalize(track.title);
 
     // Artist identity, strongest first. These deliberately outrank every title
     // match: typing an artist's name means "this artist", not "any track whose
@@ -72,13 +73,13 @@ abstract final class SearchRanker {
     if (artist == q) return _artistExact;
     if (_startsWith(artist, q)) return 800;
     if (artist.startsWith(q) && artist.length > q.length) return 700;
-    if (_containsWord(artist, q)) return 600;
+    if (TextNormalizer.containsWord(artist, q)) return 600;
     if (q.startsWith(artist) && artist.isNotEmpty) return _artistTitlePrefix;
 
     // Title matches.
     if (title == q) return 400;
     if (_startsWith(title, q)) return 300;
-    if (_containsWord(title, q)) return 200;
+    if (TextNormalizer.containsWord(title, q)) return 200;
 
     // Every token present somewhere. Covers "samara rapper" style queries.
     final List<String> tokens = q
@@ -88,7 +89,8 @@ abstract final class SearchRanker {
     if (tokens.isNotEmpty &&
         tokens.every(
           (String token) =>
-              _containsWord(artist, token) || _containsWord(title, token),
+              TextNormalizer.containsWord(artist, token) ||
+              TextNormalizer.containsWord(title, token),
         )) {
       return 100;
     }
@@ -100,7 +102,7 @@ abstract final class SearchRanker {
   ///
   /// Used to decide whether results should be grouped under that artist.
   static String? matchedArtist(String query, List<Track> tracks) {
-    final String q = _normalize(query);
+    final String q = TextNormalizer.normalize(query);
     if (q.isEmpty) return null;
 
     for (final Track track in tracks) {
@@ -111,42 +113,8 @@ abstract final class SearchRanker {
     return null;
   }
 
-  /// Lowercase, strip diacritics, drop punctuation, collapse whitespace.
-  ///
-  /// Providers are inconsistent about accents and separators ("Café", "cafe",
-  /// "C.afe" should all match the same query).
-  static String _normalize(String input) {
-    final String lower = input.toLowerCase().trim();
-    final String stripped = _stripDiacritics(lower);
-    final String noPunctuation = stripped.replaceAll(
-      RegExp(r'[^a-z0-9\u00C0-\u024F ]+'),
-      ' ',
-    );
-    return noPunctuation.replaceAll(RegExp(r'\s+'), ' ').trim();
-  }
-
-  static String _stripDiacritics(String input) {
-    const String from = 'áàâäãåéèêëíìîïóòôöõúùûüñçšž';
-    const String to = 'aaaaaaeeeeiiiiooooouuuuncsz';
-    final StringBuffer buffer = StringBuffer();
-    for (final int rune in input.runes) {
-      final String char = String.fromCharCode(rune);
-      final int index = from.indexOf(char);
-      buffer.write(index >= 0 ? to[index] : char);
-    }
-    return buffer.toString();
-  }
-
   static bool _startsWith(String value, String prefix) =>
       value.startsWith(prefix);
 
   /// Whole-word containment, so "art" does not match "partial".
-  static bool _containsWord(String value, String word) {
-    if (word.isEmpty) return false;
-    if (!value.contains(word)) return false;
-    final int at = value.indexOf(word);
-    if (at == 0) return true;
-    if (at + word.length == value.length) return true;
-    return value[at - 1] == ' ' && value[at + word.length] == ' ';
-  }
 }

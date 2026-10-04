@@ -53,6 +53,16 @@ class FakeSource implements MusicSource {
   void dispose() {}
 }
 
+/// A track attributed to `artist`, used to exercise relevance ranking.
+Track attributedTrack(String id, String artist, {int plays = 0}) => Track(
+  id: 'fake:$id',
+  title: 'Title $id',
+  artist: artist,
+  sourceId: id,
+  thumbnailUrl: null,
+  playCount: plays,
+);
+
 Track buildTrack(String id) => Track(
   id: 'fake:$id',
   title: 'Title $id',
@@ -195,6 +205,64 @@ void main() {
       await repository.search('q');
 
       expect(source.searchCalls, hasLength(2));
+    });
+  });
+  group('ranking is persisted, not just returned', () {
+    test('caches the ranked order so a cache hit replays what was shown', () async {
+      // Regression: the raw provider page used to be written to the cache while
+      // only the returned copy was ranked, so a cache hit replayed a different
+      // sequence than the user had just seen.
+      final FakeSource source = FakeSource(
+        pages: <TrackPage>[
+          TrackPage(
+            items: <Track>[
+              attributedTrack('a', 'Someone Else', plays: 5000),
+              attributedTrack('b', 'Samara', plays: 10),
+            ],
+            nextPageToken: null,
+          ),
+        ],
+      );
+      final TrackRepository repository = TrackRepository(
+        database: database,
+        sources: <MusicSource>[source],
+      );
+
+      await repository.search('samara');
+
+      final List<Track> cached = repository.cachedSearch('samara')!.items;
+      expect(
+        cached.map((Track t) => t.sourceId),
+        <String>['b', 'a'],
+        reason:
+            'the artist match must be cached first, not just returned first',
+      );
+    });
+
+    test('a cache hit returns the same order as the network did', () async {
+      final FakeSource source = FakeSource(
+        pages: <TrackPage>[
+          TrackPage(
+            items: <Track>[
+              attributedTrack('a', 'Someone Else', plays: 5000),
+              attributedTrack('b', 'Samara', plays: 10),
+            ],
+            nextPageToken: null,
+          ),
+        ],
+      );
+      final TrackRepository repository = TrackRepository(
+        database: database,
+        sources: <MusicSource>[source],
+      );
+
+      final TrackPage fresh = await repository.search('samara');
+      final TrackPage replayed = repository.cachedSearch('samara')!;
+
+      expect(
+        replayed.items.map((Track t) => t.id),
+        fresh.items.map((Track t) => t.id),
+      );
     });
   });
 }

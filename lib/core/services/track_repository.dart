@@ -1,8 +1,11 @@
 import 'dart:async';
 
 import '../errors/exceptions.dart';
+import '../models/artist_summary.dart';
 import '../models/track.dart';
+import '../search/artist_user_ranker.dart';
 import '../search/search_ranker.dart';
+import 'artist_source.dart';
 import 'database_service.dart';
 import 'music_source.dart';
 
@@ -37,6 +40,90 @@ final class TrackRepository {
     return null;
   }
 
+  // ---------------------------------------------------------------- artists
+
+  /// Sources that expose artist/channel accounts.
+  List<ArtistSource> get artistSources =>
+      sources.whereType<ArtistSource>().toList(growable: false);
+
+  /// Searches artist channels across sources, ranked for intent.
+  ///
+  /// Returns an empty list rather than throwing when no source supports
+  /// channels, because "this provider has no channels" is a normal state, not a
+  /// failure worth surfacing to the user.
+  ///
+  /// Network failures on one source do not discard another source's results;
+  /// only a total failure throws.
+  Future<List<ArtistSummary>> searchArtists(String query) async {
+    final String trimmed = query.trim();
+    if (trimmed.isEmpty) return const <ArtistSummary>[];
+
+    final List<ArtistSource> capable = artistSources;
+    if (capable.isEmpty) return const <ArtistSummary>[];
+
+    AppException? lastError;
+    final List<ArtistSummary> found = <ArtistSummary>[];
+    for (final ArtistSource source in capable) {
+      try {
+        found.addAll(await source.searchUsers(trimmed));
+      } on AppException catch (error) {
+        lastError = error;
+      } on Object catch (error) {
+        lastError = TransportException(
+          'Artist search failed on "${source.runtimeType}".',
+          cause: error,
+        );
+      }
+    }
+
+    if (found.isEmpty && lastError != null) throw lastError;
+
+    // Ranked, then filtered: a channel row is a claim about identity, so
+    // presenting the provider's fuzzy top hit would confidently show a
+    // stranger. Only genuine matches survive.
+    final List<ArtistSummary> ranked = ArtistUserRanker.rank(trimmed, found);
+    return <ArtistSummary>[
+      for (final ArtistSummary a in ranked)
+        if (ArtistUserRanker.score(trimmed, a) >=
+            ArtistUserRanker.matchThreshold)
+          a,
+    ];
+  }
+
+  /// One page of an artist's own tracks.
+  ///
+  /// Not ranked: the provider already returns a single artist's catalogue in a
+  /// meaningful order (newest first), and applying search relevance would
+  /// flatten it into popularity order.
+  Future<TrackPage> artistTracks(
+    ArtistSummary artist, {
+    String? pageToken,
+  }) async {
+    AppException? lastError;
+    for (final ArtistSource source in artistSources) {
+      try {
+        final TrackPage page = await source.fetchArtistTracks(
+          artist.sourceId,
+          pageToken: pageToken,
+        );
+        await _ignoreErrors(database.putTracks(page.items));
+        return page;
+      } on AppException catch (error) {
+        lastError = TransportException(
+          'Could not load ${artist.name}\'s tracks.',
+          cause: error,
+        );
+      } on Object catch (error) {
+        lastError = TransportException(
+          'Could not load ${artist.name}\'s tracks.',
+          cause: error,
+        );
+      }
+    }
+    throw lastError ??
+        ContentUnavailableException('No provider can list this artist.');
+  }
+
   // ----------------------------------------------------------------- search
 
   /// Cache-only lookup. Synchronous and allocation-light: safe to call from
@@ -69,22 +156,23 @@ final class TrackRepository {
         // immediate repeat search miss the cache and spend another unit of
         // provider quota, which is the exact failure the cache exists to
         // prevent. Hive writes are local and fast, so the trade is worth it.
+        // Rank before persisting, not after. Caching the provider's raw order
+        // would mean a cache hit replayed a different sequence than the one the
+        // user just saw, and SearchBloc checks the cache before searching.
+        final TrackPage ranked = _ranked(page, query);
+
         await _ignoreErrors(
-          database.cachePage(query, page, pageIndex: pageIndex),
+          database.cachePage(query, ranked, pageIndex: pageIndex),
         );
-        await _ignoreErrors(database.putTracks(page.items));
+        await _ignoreErrors(database.putTracks(ranked.items));
 
         // Opportunistic duration hydration for sources that omit it. Cheap
         // (1 unit) and never blocks the result, so it stays fire-and-forget.
-        if (page.items.any((Track t) => t.duration == null)) {
-          unawaited(_hydrateDurations(source, page));
+        if (ranked.items.any((Track t) => t.duration == null)) {
+          unawaited(_hydrateDurations(source, ranked));
         }
 
-        // Rank once, here, so every consumer sees the same order: the search
-        // screen, the queue built from it, and the cached page replayed later.
-        // Ranking inside the repository also means a cache hit is already
-        // ordered, so cached and fresh results cannot disagree.
-        return _ranked(page, query);
+        return ranked;
       } on AppException catch (error) {
         lastError = error;
         // Fall through rather than rethrow: one provider being rate limited or
