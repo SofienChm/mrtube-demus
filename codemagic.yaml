@@ -129,6 +129,67 @@ workflows:
         script: |
           xcode-project use-profiles
 
+      # Codemagic's use-profiles writes DEVELOPMENT_TEAM,
+      # PROVISIONING_PROFILE_SPECIFIER and CODE_SIGN_IDENTITY into the project,
+      # but it cannot override what is already in the committed Flutter template:
+      #
+      #   "CODE_SIGN_IDENTITY[sdk=iphoneos*]" = "iPhone Developer";
+      #
+      # A conditional build setting is more specific than an unconditional one,
+      # so for sdk=iphoneos that template line wins over the distribution
+      # identity use-profiles just injected. The archive is then signed for
+      # development with no embedded profile, and the archive succeeds, while
+      # xcodebuild -exportArchive refuses it:
+      #
+      #   error: exportArchive "Runner.app" requires a provisioning profile.
+      #
+      # "iPhone Developer" is also not a valid identity name in Xcode 14+, where
+      # the identities are "Apple Development" and "Apple Distribution".
+      #
+      # Deleting the conditional lets the injected values apply, and forcing
+      # Manual stops Xcode attempting automatic resolution with no team, which is
+      # what allowed an archive with no profile to build at all. This runs only in
+      # the CI workspace, so local `flutter run` keeps automatic development
+      # signing, and ios-simulator-build never signs so it is unaffected.
+      - name: Force manual distribution signing
+        script: |
+          set -euo pipefail
+          PROJECT=ios/Runner.xcodeproj
+
+          if grep -q 'CODE_SIGN_IDENTITY\[sdk=iphoneos\*\]' "$PROJECT/project.pbxproj"; then
+            sed -i '' '/CODE_SIGN_IDENTITY\[sdk=iphoneos\*\]/d' "$PROJECT/project.pbxproj"
+            echo "Removed template conditional CODE_SIGN_IDENTITY[sdk=iphoneos*]"
+          fi
+
+          if grep -q 'CODE_SIGN_STYLE = Automatic;' "$PROJECT/project.pbxproj"; then
+            sed -i '' 's/CODE_SIGN_STYLE = Automatic;/CODE_SIGN_STYLE = Manual;/g' "$PROJECT/project.pbxproj"
+            echo "Switched CODE_SIGN_STYLE from Automatic to Manual"
+          fi
+
+          # Report the settings the archive will actually use, and fail here if
+          # signing is still incomplete. Failing now names the missing key, instead
+          # of surfacing much later as an opaque exportArchive error.
+          settings="$(xcodebuild -showBuildSettings -project "$PROJECT" -scheme Runner -configuration Release)"
+
+          missing=0
+          for key in CODE_SIGN_STYLE CODE_SIGN_IDENTITY PROVISIONING_PROFILE_SPECIFIER DEVELOPMENT_TEAM; do
+            value="$(printf '%s\n' "$settings" | sed -n "s/^ *${key} = //p" | sort -u | tr '\n' ' ')"
+            if [ -z "$value" ]; then
+              echo "::error::$key is empty for the Release configuration, so the IPA export cannot work"
+              missing=1
+            else
+              echo "$key = $value"
+            fi
+          done
+
+          if [ "$missing" -ne 0 ]; then
+            echo "If PROVISIONING_PROFILE_SPECIFIER or DEVELOPMENT_TEAM are empty, the previous step"
+            echo "(apply-signing-certificates / xcode-project use-profiles) did not match this bundle ID:"
+            echo "  bundle id: $(grep -o 'PRODUCT_BUNDLE_IDENTIFIER = .*' "$PROJECT/project.pbxproj" | head -1 | sed 's/.*= //')"
+            echo "  profile:   $(ls -1 "$HOME/Library/MobileDevice/Provisioning Profiles" 2>/dev/null | wc -l | tr -d ' ') downloaded"
+            exit 1
+          fi
+
       - name: Clean Xcode build
         script: |
           xcodebuild clean \
