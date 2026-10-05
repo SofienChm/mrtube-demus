@@ -66,16 +66,37 @@ workflows:
         script: |
           flutter pub get
 
-      # 2. Podfile guard. There is no pod install step on purpose, but if a
-      #    plugin ever adds a CocoaPods podspec, fail loudly and early with a
-      #    useful message instead of a confusing link error much later.
-      - name: Assert no Podfile (Swift Package Manager build)
+      # 2. Fail early and legibly on the two input mistakes that are otherwise
+      #    discovered by the export step, which reports them confusingly.
+      - name: Verify iOS build inputs
         script: |
+          set -euo pipefail
+
+          echo "Working directory: $(pwd)"
+
+          # Absolute path from $(pwd), not $CI_PROJECT_ROOT: Codemagic does not
+          # define CI_PROJECT_ROOT, so it expanded to an empty string and the
+          # path became "/ios/ExportOptions.plist", which does not exist.
+          # $(pwd) is correct because working_directory pins this to the repo
+          # root, and earlier steps already rely on that with relative ios/ paths.
+          export_options="$(pwd)/ios/ExportOptions.plist"
+          if [ ! -f "$export_options" ]; then
+            echo "::error::Export options plist not found at $export_options"
+            echo "Contents of ios/:"
+            ls -la ios/ || true
+            exit 1
+          fi
+          echo "Export options: $export_options"
+
+          # No pod install step on purpose (plugins resolve through Swift Package
+          # Manager). If a plugin ever adds a CocoaPods podspec, fail now rather
+          # than much later with a confusing link error.
           if [ -f ios/Podfile ]; then
             echo "::error::ios/Podfile exists but this workflow has no 'pod install' step."
             echo "Add a CocoaPods install step to codemagic.yaml before shipping."
             exit 1
           fi
+          echo "No Podfile: Swift Package Manager build. OK"
 
       # Deliberately no `agvtool new-version` step.
       #
@@ -127,13 +148,11 @@ workflows:
           # upload-symbols and manageAppVersionAndNumber=false. The method comes
           # from its "method" key instead of a separate flag.
           #
-          # Absolute path because the export runs from the archive step's
-          # working directory, not the repo root.
           flutter build ipa \
             --release \
             --no-codesign \
             --build-number="$BUILD_NUMBER" \
-            --export-options-plist="$CI_PROJECT_ROOT/ios/ExportOptions.plist"
+            --export-options-plist="$(pwd)/ios/ExportOptions.plist"
 
       # Proves the export really honoured the profile applied above, rather than
       # silently producing an unsigned or ad-hoc-signed IPA.
