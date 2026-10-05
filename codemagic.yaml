@@ -125,89 +125,23 @@ workflows:
         script: |
           keychain add-certificates
 
-      - name: Apply provisioning profiles
-        script: |
-          xcode-project use-profiles
-
-      # Codemagic's use-profiles writes DEVELOPMENT_TEAM,
-      # PROVISIONING_PROFILE_SPECIFIER and CODE_SIGN_IDENTITY into the project,
-      # but it cannot override what is already in the committed Flutter template:
-      #
-      #   "CODE_SIGN_IDENTITY[sdk=iphoneos*]" = "iPhone Developer";
-      #
-      # A conditional build setting is more specific than an unconditional one,
-      # so for sdk=iphoneos that template line wins over the distribution
-      # identity use-profiles just injected. The archive is then signed for
-      # development with no embedded profile, and the archive succeeds, while
-      # xcodebuild -exportArchive refuses it:
-      #
-      #   error: exportArchive "Runner.app" requires a provisioning profile.
-      #
-      # "iPhone Developer" is also not a valid identity name in Xcode 14+, where
-      # the identities are "Apple Development" and "Apple Distribution".
-      #
-      # Deleting the conditional lets the injected values apply, and forcing
-      # Manual stops Xcode attempting automatic resolution with no team, which is
-      # what allowed an archive with no profile to build at all. This runs only in
-      # the CI workspace, so local `flutter run` keeps automatic development
-      # signing, and ios-simulator-build never signs so it is unaffected.
-      - name: Force manual distribution signing
-        script: |
-          set -euo pipefail
-          PROJECT=ios/Runner.xcodeproj
-
-          if grep -q 'CODE_SIGN_IDENTITY\[sdk=iphoneos\*\]' "$PROJECT/project.pbxproj"; then
-            sed -i '' '/CODE_SIGN_IDENTITY\[sdk=iphoneos\*\]/d' "$PROJECT/project.pbxproj"
-            echo "Removed template conditional CODE_SIGN_IDENTITY[sdk=iphoneos*]"
-          fi
-
-          if grep -q 'CODE_SIGN_STYLE = Automatic;' "$PROJECT/project.pbxproj"; then
-            sed -i '' 's/CODE_SIGN_STYLE = Automatic;/CODE_SIGN_STYLE = Manual;/g' "$PROJECT/project.pbxproj"
-            echo "Switched CODE_SIGN_STYLE from Automatic to Manual"
-          fi
-
-          # Report the settings the archive will actually use, and fail here if
-          # signing is still incomplete. Failing now names the missing key, instead
-          # of surfacing much later as an opaque exportArchive error.
-          settings="$(xcodebuild -showBuildSettings -project "$PROJECT" -scheme Runner -configuration Release)"
-
-          missing=0
-          for key in CODE_SIGN_STYLE CODE_SIGN_IDENTITY PROVISIONING_PROFILE_SPECIFIER DEVELOPMENT_TEAM; do
-            value="$(printf '%s\n' "$settings" | sed -n "s/^ *${key} = //p" | sort -u | tr '\n' ' ')"
-            if [ -z "$value" ]; then
-              echo "::error::$key is empty for the Release configuration, so the IPA export cannot work"
-              missing=1
-            else
-              echo "$key = $value"
-            fi
-          done
-
-          if [ "$missing" -ne 0 ]; then
-            echo "If PROVISIONING_PROFILE_SPECIFIER or DEVELOPMENT_TEAM are empty, the previous step"
-            echo "(apply-signing-certificates / xcode-project use-profiles) did not match this bundle ID:"
-            echo "  bundle id: $(grep -o 'PRODUCT_BUNDLE_IDENTIFIER = .*' "$PROJECT/project.pbxproj" | head -1 | sed 's/.*= //')"
-            echo "  profile:   $(ls -1 "$HOME/Library/MobileDevice/Provisioning Profiles" 2>/dev/null | wc -l | tr -d ' ') downloaded"
-            exit 1
-          fi
-
       - name: Clean Xcode build
         script: |
           xcodebuild clean \
             -project ios/Runner.xcodeproj \
             -scheme Runner
 
-      # Flutter's own archiving, not a bare xcodebuild archive. It runs
-      # SPM plugin resolution, compiles Dart to AOT, assembles the app, signs it
-      # with the identity and profile that `xcode-project use-profiles` applied,
-      # then runs xcodebuild -exportArchive to produce the IPA.
+      # Flutter's own archiving, not a bare xcodebuild archive. It runs SPM plugin
+      # resolution, compiles Dart to AOT and assembles the app, which a bare
+      # xcodebuild archive would not do.
       #
-      # NOTE: no --no-codesign here. It does NOT mean "archive unsigned, then sign
-      # during export". Flutter checks it and returns before exporting at all
-      # (build_ios.dart: "Codesigning disabled with --no-codesign, skipping
-      # IPA."), so it produces an xcarchive and NO ipa, while still exiting 0.
-      # That is why the artifact glob and the verification step both came up
-      # empty even though the build step reported success.
-      - name: Build and export signed IPA
+      # --no-codesign is deliberate here, unlike earlier revisions. Flutter checks
+      # the flag and returns before exporting (build_ios.dart: "Codesigning
+      # disabled with --no-codesign, skipping IPA."), so this produces the
+      # xcarchive and no IPA, exiting 0. That is exactly what is wanted: signing
+      # and export are done explicitly in the next step, because Flutter signs from
+      # its own saved config rather than from the Xcode project.
+      - name: Build the unsigned archive
         script: |
           # NOTE: --export-method and --export-options-plist are mutually
           # exclusive. Passing both fails with:
@@ -216,24 +150,146 @@ workflows:
           # upload-symbols and manageAppVersionAndNumber=false. The method comes
           # from its "method" key instead of a separate flag.
           #
+          # --no-codesign here is deliberate and correct: Flutter returns before
+          # exporting, which is what we want, because the next step signs the
+          # archived .app and calls xcodebuild -exportArchive itself.
           flutter build ipa \
             --release \
-            --build-number="$BUILD_NUMBER" \
-            --export-options-plist="$(pwd)/ios/ExportOptions.plist"
+            --no-codesign \
+            --build-number="$BUILD_NUMBER"
 
-          # Fail in the step that owns the problem. Without this, a skipped
-          # export surfaces as an empty artifact list or a confusing failure in
-          # the verification step instead.
-          if ! ls -1 build/ios/ipa/*.ipa >/dev/null 2>&1; then
-            echo "::error::flutter build ipa produced no IPA in build/ios/ipa/"
-            echo "xcarchive that was produced instead:"
-            ls -la build/ios/archive/ 2>/dev/null || echo "  (none)"
+          if [ ! -d build/ios/archive/Runner.xcarchive ]; then
+            echo "::error::no xcarchive was produced"
             exit 1
           fi
+      # Flutter signs from its own saved config, not from the Xcode project, and
+      # passes those settings straight to xcodebuild as command line overrides
+      # (flutter_tools mac.dart: "buildCommands.add('${entry.key}=${entry.value}')",
+      # sourced from code_signing.dart which reads ~/.config/flutter settings).
+      # So `xcode-project use-profiles` writes the profile into the project and
+      # Flutter then overrides it away. The archive is therefore signed without an
+      # embedded profile and xcodebuild -exportArchive refuses it:
+      #
+      #   error: exportArchive "Runner.app" requires a provisioning profile.
+      #
+      # Signing the archived app explicitly removes that ambiguity: resolve the
+      # profile by decoding it and matching the bundle id, embed it, codesign the
+      # nested code then the app, and export with xcodebuild directly.
+      - name: Diagnose archive signing state
+        script: |
+          echo "Xcode: $(xcodebuild -version | tr '\n' ' ')"
+          echo "Flutter: $(flutter --version --machine | head -c 200)"
+          APP=build/ios/archive/Runner.xcarchive/Products/Applications/Runner.app
+          echo "App: $APP"
+          echo "--- codesign -dvvv (current archive state) ---"
+          codesign -dvvv "$APP" 2>&1 | grep -Ei "Identifier|Authority|TeamIdentifier|Signature|Format" || echo "(unsigned)"
+          echo "--- embedded.mobileprovision present? ---"
+          if [ -f "$APP/embedded.mobileprovision" ]; then
+            echo "YES"
+          else
+            echo "NO  <- this is why export fails"
+          fi
+          echo "--- profiles on this machine ---"
+          find "$HOME/Library/MobileDevice/Provisioning Profiles" ./profile "$HOME/.codemagic" \
+            -name '*.mobileprovision' 2>/dev/null | while read -r f; do
+            echo "  $f"
+          done
+          echo "--- signing identities ---"
+          security find-identity -v -p codesigning 2>/dev/null | sed 's/^/  /' || true
+          echo "--- Release build settings ---"
+          xcodebuild -showBuildSettings -project ios/Runner.xcodeproj -scheme Runner -configuration Release 2>/dev/null \
+            | grep -E "^ *(CODE_SIGN|PROVISIONING_PROFILE|DEVELOPMENT_TEAM)" | sort -u | sed 's/^/  /' || true
+
+      - name: Sign the archived app and export the IPA
+        script: |
+          set -euo pipefail
+
+          ARCHIVE=build/ios/archive/Runner.xcarchive
+          APP="$ARCHIVE/Products/Applications/Runner.app"
+          BUNDLE_ID="com.mrplay.mrplayNew"
+          WORK="$(mktemp -d)"
+
+          # Resolve the provisioning profile by decoding each candidate and
+          # matching its application-identifier against our bundle id. Matching on
+          # the decoded content rather than the filename, because the filename is
+          # a UUID that changes on every --create run.
+          find "$HOME/Library/MobileDevice/Provisioning Profiles" ./profile "$HOME/.codemagic" \
+            -name '*.mobileprovision' > "$WORK/profiles.txt" 2>/dev/null || true
+          echo "Found $(wc -l < "$WORK/profiles.txt" | tr -d ' ') candidate profile(s)"
+
+          PROFILE=""
+          while read -r candidate; do
+            if ! security cms -D -i "$candidate" > "$WORK/candidate.plist" 2>/dev/null; then
+              continue
+            fi
+            app_id="$(plutil -extract Entitlements.application-identifier raw -o - "$WORK/candidate.plist" 2>/dev/null || echo '')"
+            if [ "${app_id##*.}" = "$BUNDLE_ID" ]; then
+              echo "Matched profile: $candidate"
+              echo "  name:    $(plutil -extract Name raw -o - "$WORK/candidate.plist")"
+              echo "  app id:  $app_id"
+              echo "  team:    $(plutil -extract TeamIdentifier.0 raw -o - "$WORK/candidate.plist")"
+              echo "  expires: $(plutil -extract ExpirationDate raw -o - "$WORK/candidate.plist")"
+              PROFILE="$candidate"
+              cp "$WORK/candidate.plist" "$WORK/profile.plist"
+              break
+            fi
+          done < "$WORK/profiles.txt"
+
+          if [ -z "$PROFILE" ]; then
+            echo "::error::no provisioning profile found whose application-identifier ends in .$BUNDLE_ID"
+            echo "Searched: ~/Library/MobileDevice/Provisioning Profiles, ./profile, ~/.codemagic"
+            echo "If the list above was empty, the earlier fetch-signing-files step"
+            echo "created nothing, so check its output and the App Store Connect setup."
+            exit 1
+          fi
+
+          TEAM="$(plutil -extract Entitlements.application-identifier raw -o - "$WORK/profile.plist")"
+          TEAM="${TEAM%%.*}"
+
+          # Use the entitlements from the profile so the signature matches what
+          # Apple expects, rather than an empty or guessed set.
+          plutil -extract Entitlements xml1 -o "$WORK/entitlements.plist" "$WORK/profile.plist"
+          echo "Entitlements to apply:"
+          plutil -p "$WORK/entitlements.plist" | sed 's/^/  /'
+
+          # Embed the profile, then sign. Nested code must be signed before the
+          # enclosing bundle or verification of the app fails.
+          cp "$PROFILE" "$APP/embedded.mobileprovision"
+
+          SIGN_IDENTITY="Apple Distribution"
+          if ! security find-identity -v -p codesigning | grep -q "Apple Distribution"; then
+            SIGN_IDENTITY="$(security find-identity -v -p codesigning | sed -n 's/.*"\(.*\)".*/\1/p' | head -1)"
+          fi
+          echo "Signing with: $SIGN_IDENTITY (team $TEAM)"
+
+          # Sign nested code before the enclosing bundle, or verification of the
+          # app fails. Globbing with quotes keeps any spaces intact.
+          for nested in "$APP"/Frameworks/*.framework "$APP"/Frameworks/*.dylib; do
+            [ -e "$nested" ] || continue
+            codesign --force --sign "$SIGN_IDENTITY" --timestamp "$nested"
+            echo "  signed ${nested##*/}"
+          done
+
+          codesign --force \
+            --sign "$SIGN_IDENTITY" \
+            --entitlements "$WORK/entitlements.plist" \
+            --options runtime \
+            --timestamp \
+            "$APP"
+
+          echo "--- verifying ---"
+          codesign --verify --verbose=2 "$APP" 2>&1 | sed 's/^/  /'
+          codesign -dvvv "$APP" 2>&1 | grep -Ei "Identifier|Authority|TeamIdentifier|Signature" | sed 's/^/  /'
+
+          rm -rf build/ios/ipa
+          xcodebuild -exportArchive \
+            -archivePath "$ARCHIVE" \
+            -exportOptionsPlist "$(pwd)/ios/ExportOptions.plist" \
+            -exportPath build/ios/ipa
+
+          echo "--- exported ---"
           ls -la build/ios/ipa/
 
-      # Proves the export really honoured the profile applied above, rather than
-      # silently producing an unsigned or ad-hoc-signed IPA.
       - name: Verify the IPA was signed with the distribution profile
         script: |
           set -euo pipefail
