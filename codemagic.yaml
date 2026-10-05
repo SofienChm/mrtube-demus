@@ -1,0 +1,172 @@
+# Codemagic workflow — builds the iOS app and publishes it to App Store Connect
+# (TestFlight).
+#
+# Same signing flow as the working miniminds-web config: the codemagic CLI tools
+# fetch the cert + profile with the App Store Connect API key, install them,
+# apply the profile to the project, then build.
+#
+# The iOS project IS COMMITTED (ios/) — Codemagic only syncs it, it does not
+# regenerate it. Two consequences worth knowing:
+#
+#   * Do not run `flutter create .` on a build machine. That rewrites the Xcode
+#     project and silently drops signing settings.
+#   * `ios/Flutter/Generated.xcconfig` and `ios/Flutter/ephemeral/` are
+#     gitignored (correctly) and are regenerated on each build by `flutter pub
+#     get`, so they are never in the repo.
+#
+# This project uses Swift Package Manager for plugins, NOT CocoaPods — there is
+# no `ios/Podfile` and `flutter build ipa` does not run `pod install`. That is
+# why there is no pod step below, matching miniminds-web. If a plugin with a
+# CocoaPods podspec is ever added, this breaks and needs a `pod install` step.
+#
+# Verified against this repo rather than assumed:
+#   * Bundle id          com.mrplay.mrplayNew
+#   * Scheme / project   Runner (ios/Runner.xcodeproj)
+#   * Deployment target  iOS 15.0
+#   * Display name       MrPlay
+#   * Projected Flutter  3.47.6 stable
+#
+# Setup required in Codemagic (one-time):
+#   1. App Store Connect integration named "codemagic full access".
+#   2. On this app's "Environment variables" page, copy the four variables that
+#      miniminds-web uses: CERTIFICATE_PRIVATE_KEY, APP_STORE_CONNECT_PRIVATE_KEY,
+#      APP_STORE_CONNECT_KEY_IDENTIFIER and APP_STORE_CONNECT_ISSUER_ID (exact
+#      values from the working miniminds-web project).
+#   3. Register com.mrplay.mrplayNew in App Store Connect and in the Apple
+#      developer portal. Note the capital N: this is Flutter's generated id, and
+#      it is NOT com.mrplay.mrplay_new.
+#   4. Nothing else. The workflow is at the repo root, so working_directory is the
+#      repo root — unlike miniminds-web, which builds from frontend/erp-app.
+
+workflows:
+  ios-build:
+    name: iOS Build
+    # Repo root. The Flutter project is at the top level, not in a subfolder.
+    working_directory: .
+    max_build_duration: 60
+    instance_type: mac_mini_m2
+
+    integrations:
+      app_store_connect: codemagic full access
+
+    environment:
+      # Newer than miniminds-web's node 22 line: this project needs Flutter
+      # 3.47.6 stable, which requires Dart 3.10 or newer.
+      flutter: 3.47.6
+      xcode: latest
+      cocoapods: default
+      groups:
+        - default
+
+    scripts:
+      # 1. pub get first. It generates ios/Flutter/Generated.xcconfig and the SPM
+      #    plugin package that the committed Xcode project references but that
+      #    does not exist in a fresh clone.
+      - name: Resolve Flutter dependencies
+        script: |
+          flutter pub get
+
+      # 2. Podfile lint. There is no pod install step on purpose, but if a
+      #    plugin ever adds a CocoaPods podspec, fail loudly and early with a
+      #    useful message instead of a confusing link error much later.
+      - name: Assert no Podfile (Swift Package Manager build)
+        script: |
+          if [ -f ios/Podfile ]; then
+            echo "::error::ios/Podfile exists but this workflow has no 'pod install' step."
+            echo "Add a CocoaPods install step to codemagic.yaml before shipping."
+            exit 1
+          fi
+
+      - name: Set build number
+        script: |
+          # agvtool only touches the version numbers, which Flutter then reads
+          # back for the archive. It must run after pub get, which is what
+          # regenerates Generated.xcconfig.
+          cd ios
+          agvtool new-version -all $BUILD_NUMBER
+
+      - name: Initialize keychain
+        script: |
+          keychain initialize
+
+      - name: Fetch signing files
+        script: |
+          app-store-connect fetch-signing-files com.mrplay.mrplayNew \
+            --type IOS_APP_STORE \
+            --create \
+            --certificate-key "$CERTIFICATE_PRIVATE_KEY"
+
+      - name: Add certificates to keychain
+        script: |
+          keychain add-certificates
+
+      - name: Apply provisioning profiles
+        script: |
+          xcode-project use-profiles
+
+      - name: Clean Xcode build
+        script: |
+          xcodebuild clean \
+            -project ios/Runner.xcodeproj \
+            -scheme Runner
+
+      # Flutter's own archiving, not a bare xcodebuild archive. It runs
+      # `pod install`-equivalent SPM resolution, compiles Dart to AOT
+      # (--no-codesign so our profile supplies the identity), assembles the app,
+      # then codesigns and exports the IPA.
+      - name: Build and export signed IPA
+        script: |
+          flutter build ipa \
+            --release \
+            --no-codesign \
+            --export-method app-store \
+            --export-options-plist=ios/ExportOptions.plist
+
+      # Proves the export really honoured the profile applied above, rather than
+      # silently producing an unsigned or ad-hoc-signed IPA.
+      - name: Verify the IPA was signed with the distribution profile
+        script: |
+          set -euo pipefail
+          mkdir -p ipa_unzip
+          ipa=$(ls -1 build/ios/ipa/*.ipa | head -1)
+          unzip -q -o "$ipa" -d ipa_unzip
+
+          app_dir=$(find ipa_unzip/Payload -maxdepth 1 -name "*.app" | head -1)
+          codesign -dvvv "$app_dir" 2>&1 | tee signature.txt
+
+          grep -q "Authority=Apple Distribution" signature.txt || {
+            echo "::error::IPA is not signed with an Apple Distribution certificate."
+            exit 1
+          }
+
+    artifacts:
+      - build/ios/ipa/*.ipa
+
+    publishing:
+      app_store_connect:
+        auth: integration
+        submit_to_testflight: true
+
+  # Builds an iOS Simulator archive without signing. Useful for checking that the
+  # Dart side compiles for iOS at all, at no signing cost and with no App Store
+  # Connect dependency.
+  ios-simulator-build:
+    name: iOS Simulator Build (no signing)
+    working_directory: .
+    max_build_duration: 45
+    instance_type: mac_mini_m2
+
+    environment:
+      flutter: 3.47.6
+      xcode: latest
+      groups:
+        - default
+
+    scripts:
+      - name: Resolve Flutter dependencies
+        script: |
+          flutter pub get
+
+      - name: Build for the iOS simulator
+        script: |
+          flutter build ios --simulator --debug

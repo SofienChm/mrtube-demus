@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!--
+	  Passed to the xcodebuild exportArchive step by
+	  "flutter build ipa" with the export-options-plist flag.
+
+	  method "app-store" produces a distribution IPA for App Store Connect and
+	  TestFlight. The alternatives are "development" (developer signed, which
+	  TestFlight rejects) and "ad-hoc" (no provisioning profile, which TestFlight
+	  also rejects), so getting this wrong fails late, at upload time.
+
+	  upload-symbols is true because Flutter release builds are stripped, so
+	  crash reports from TestFlight would otherwise be unsymbolicated and
+	  unreadable.
+
+	  manageAppVersionAndNumber is false: build numbers come from Codemagic's
+	  BUILD_NUMBER variable, not from Xcode. Letting Xcode manage them would
+	  silently produce duplicate build numbers, which App Store Connect rejects.
+
+	  compileBitcode is false: bitcode was deprecated by Apple in Xcode 14 and is
+	  no longer produced by current toolchains.
+	-->
+	<key>method</key>
+	<string>app-store</string>
+	<key>upload-symbols</key>
+	<true/>
+	<key>manageAppVersionAndNumber</key>
+	<false/>
+	<key>stripSwiftSymbols</key>
+	<true/>
+	<key>compileBitcode</key>
+	<false/>
+</dict>
+</plist>
