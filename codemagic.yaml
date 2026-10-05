@@ -66,7 +66,7 @@ workflows:
         script: |
           flutter pub get
 
-      # 2. Podfile lint. There is no pod install step on purpose, but if a
+      # 2. Podfile guard. There is no pod install step on purpose, but if a
       #    plugin ever adds a CocoaPods podspec, fail loudly and early with a
       #    useful message instead of a confusing link error much later.
       - name: Assert no Podfile (Swift Package Manager build)
@@ -77,13 +77,17 @@ workflows:
             exit 1
           fi
 
-      - name: Set build number
-        script: |
-          # agvtool only touches the version numbers, which Flutter then reads
-          # back for the archive. It must run after pub get, which is what
-          # regenerates Generated.xcconfig.
-          cd ios
-          agvtool new-version -all $BUILD_NUMBER
+      # Deliberately no `agvtool new-version` step.
+      #
+      # It looks correct but does nothing here: this project's Release config
+      # sets CURRENT_PROJECT_VERSION to $(FLUTTER_BUILD_NUMBER), which overrides
+      # the project-level literal agvtool rewrites. That variable comes from
+      # Generated.xcconfig, which is derived from the version in pubspec.yaml, so
+      # every build would ship as CFBundleVersion 1 and App Store Connect would
+      # reject the second upload as a duplicate.
+      #
+      # The build number is passed to `flutter build ipa` as --build-number
+      # instead, which writes it where the Xcode setting actually reads it.
 
       - name: Initialize keychain
         script: |
@@ -116,11 +120,20 @@ workflows:
       # then codesigns and exports the IPA.
       - name: Build and export signed IPA
         script: |
+          # NOTE: --export-method and --export-options-plist are mutually
+          # exclusive. Passing both fails with:
+          #   "--export-options-plist" is not compatible with "--export-method"
+          # The plist is the one that matters, because it carries
+          # upload-symbols and manageAppVersionAndNumber=false. The method comes
+          # from its "method" key instead of a separate flag.
+          #
+          # Absolute path because the export runs from the archive step's
+          # working directory, not the repo root.
           flutter build ipa \
             --release \
             --no-codesign \
-            --export-method app-store \
-            --export-options-plist=ios/ExportOptions.plist
+            --build-number="$BUILD_NUMBER" \
+            --export-options-plist="$CI_PROJECT_ROOT/ios/ExportOptions.plist"
 
       # Proves the export really honoured the profile applied above, rather than
       # silently producing an unsigned or ad-hoc-signed IPA.
