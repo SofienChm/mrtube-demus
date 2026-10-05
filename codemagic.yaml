@@ -136,9 +136,16 @@ workflows:
             -scheme Runner
 
       # Flutter's own archiving, not a bare xcodebuild archive. It runs
-      # `pod install`-equivalent SPM resolution, compiles Dart to AOT
-      # (--no-codesign so our profile supplies the identity), assembles the app,
-      # then codesigns and exports the IPA.
+      # SPM plugin resolution, compiles Dart to AOT, assembles the app, signs it
+      # with the identity and profile that `xcode-project use-profiles` applied,
+      # then runs xcodebuild -exportArchive to produce the IPA.
+      #
+      # NOTE: no --no-codesign here. It does NOT mean "archive unsigned, then sign
+      # during export". Flutter checks it and returns before exporting at all
+      # (build_ios.dart: "Codesigning disabled with --no-codesign, skipping
+      # IPA."), so it produces an xcarchive and NO ipa, while still exiting 0.
+      # That is why the artifact glob and the verification step both came up
+      # empty even though the build step reported success.
       - name: Build and export signed IPA
         script: |
           # NOTE: --export-method and --export-options-plist are mutually
@@ -150,9 +157,19 @@ workflows:
           #
           flutter build ipa \
             --release \
-            --no-codesign \
             --build-number="$BUILD_NUMBER" \
             --export-options-plist="$(pwd)/ios/ExportOptions.plist"
+
+          # Fail in the step that owns the problem. Without this, a skipped
+          # export surfaces as an empty artifact list or a confusing failure in
+          # the verification step instead.
+          if ! ls -1 build/ios/ipa/*.ipa >/dev/null 2>&1; then
+            echo "::error::flutter build ipa produced no IPA in build/ios/ipa/"
+            echo "xcarchive that was produced instead:"
+            ls -la build/ios/archive/ 2>/dev/null || echo "  (none)"
+            exit 1
+          fi
+          ls -la build/ios/ipa/
 
       # Proves the export really honoured the profile applied above, rather than
       # silently producing an unsigned or ad-hoc-signed IPA.
